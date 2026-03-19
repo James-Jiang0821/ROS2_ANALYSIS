@@ -14,7 +14,6 @@ with open(MCAP_FILE, "rb") as f:
     for schema, channel, message, decoded in reader.iter_decoded_messages():
         topic = channel.topic
 
-        # /iridium/signal_strength -> std_msgs/String, example: String(data=5)
         if topic == "/iridium/signal_strength":
             signal_rows.append({
                 "topic": topic,
@@ -22,7 +21,6 @@ with open(MCAP_FILE, "rb") as f:
                 "signal_strength": decoded.data,
             })
 
-        # /iridium/incoming_message -> std_msgs/String
         elif topic == "/iridium/incoming_message":
             incoming_rows.append({
                 "topic": topic,
