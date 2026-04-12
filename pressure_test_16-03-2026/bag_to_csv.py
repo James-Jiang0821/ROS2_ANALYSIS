@@ -1,66 +1,113 @@
-import csv
 import os
-import re
-from collections import defaultdict
+import pandas as pd
+
 from mcap.reader import make_reader
 from mcap_ros2.decoder import DecoderFactory
 
-MCAP_FILE = "pressure_test_0.mcap"
-OUTPUT_DIR = "split_topics_csv"
+
+# =========================
+# CONFIG
+# =========================
+BAG_FILE = "pressure_test_0.mcap"   # change this if needed
+OUTPUT_DIR = "csv_output"
+# =========================
 
 
-def safe_filename(topic_name: str) -> str:
+def topic_to_filename(topic_name: str) -> str:
+    """Convert ROS topic name into a safe CSV filename."""
+    return topic_name.replace("/", "_").strip("_") + ".csv"
+
+
+def ros_message_to_row(ros_msg, log_time_ns: int) -> dict:
     """
-    Convert a ROS topic name into a safe filename.
-    Example:
-        /gps/fix -> gps_fix.csv
-        /iridium/incoming_message -> iridium_incoming_message.csv
+    Convert a decoded ROS2 message into a flat dict row for CSV export.
+    This handles common simple message types and some ROS log fields.
     """
-    name = topic_name.strip("/")
-    if not name:
-        name = "root_topic"
-    name = name.replace("/", "_")
-    name = re.sub(r"[^A-Za-z0-9_\-]", "_", name)
-    return f"{name}.csv"
+    row = {
+        "timestamp_ns": log_time_ns,
+        "timestamp_s": log_time_ns / 1e9,
+    }
+
+    # std_msgs like Float64, String
+    if hasattr(ros_msg, "data"):
+        row["data"] = ros_msg.data
+
+    # sensor_msgs/Temperature
+    if hasattr(ros_msg, "temperature"):
+        row["temperature"] = ros_msg.temperature
+    if hasattr(ros_msg, "variance"):
+        row["variance"] = ros_msg.variance
+
+    # sensor_msgs/FluidPressure
+    if hasattr(ros_msg, "fluid_pressure"):
+        row["fluid_pressure"] = ros_msg.fluid_pressure
+    if hasattr(ros_msg, "variance"):
+        row["variance"] = ros_msg.variance
+
+    # rcl_interfaces/msg/Log (for /rosout)
+    if hasattr(ros_msg, "stamp"):
+        if hasattr(ros_msg.stamp, "sec"):
+            row["stamp_sec"] = ros_msg.stamp.sec
+        if hasattr(ros_msg.stamp, "nanosec"):
+            row["stamp_nanosec"] = ros_msg.stamp.nanosec
+
+    if hasattr(ros_msg, "level"):
+        row["level"] = ros_msg.level
+    if hasattr(ros_msg, "name"):
+        row["name"] = ros_msg.name
+    if hasattr(ros_msg, "msg"):
+        row["msg"] = ros_msg.msg
+    if hasattr(ros_msg, "file"):
+        row["file"] = ros_msg.file
+    if hasattr(ros_msg, "function"):
+        row["function"] = ros_msg.function
+    if hasattr(ros_msg, "line"):
+        row["line"] = ros_msg.line
+
+    return row
 
 
-# Store rows grouped by topic
-topic_rows = defaultdict(list)
-topic_types = {}
+def main():
+    if not os.path.exists(BAG_FILE):
+        raise FileNotFoundError(f"Bag file not found: {BAG_FILE}")
 
-with open(MCAP_FILE, "rb") as f:
-    reader = make_reader(f, decoder_factories=[DecoderFactory()])
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    for schema, channel, message, decoded in reader.iter_decoded_messages():
-        topic = channel.topic
-        msg_type = schema.name if schema is not None else "unknown"
+    decoder_factory = DecoderFactory()
+    topic_data = {}
 
-        topic_types[topic] = msg_type
+    with open(BAG_FILE, "rb") as f:
+        reader = make_reader(f, decoder_factories=[decoder_factory])
 
-        topic_rows[topic].append({
-            "log_time_ns": message.log_time,
-            "topic": topic,
-            "type": msg_type,
-            "message": str(decoded),
-        })
+        for schema, channel, message, ros_msg in reader.iter_decoded_messages():
+            topic = channel.topic
 
-# Make output folder
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+            if topic not in topic_data:
+                topic_data[topic] = []
 
-# Write one CSV per topic
-for topic, rows in topic_rows.items():
-    filename = safe_filename(topic)
-    filepath = os.path.join(OUTPUT_DIR, filename)
+            row = ros_message_to_row(ros_msg, message.log_time)
+            topic_data[topic].append(row)
 
-    with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(
-            csvfile,
-            fieldnames=["log_time_ns", "topic", "type", "message"]
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+    if not topic_data:
+        print("No decoded messages found in the bag.")
+        return
 
-    print(f"Wrote {len(rows)} rows -> {filepath}")
+    print("Topics found:")
+    for topic, rows in topic_data.items():
+        print(f"  {topic}: {len(rows)} messages")
 
-print("\nDone.")
-print(f"Created {len(topic_rows)} CSV files in '{OUTPUT_DIR}'")
+    print("\nSaving CSV files...")
+    for topic, rows in topic_data.items():
+        if not rows:
+            continue
+
+        df = pd.DataFrame(rows)
+        output_file = os.path.join(OUTPUT_DIR, topic_to_filename(topic))
+        df.to_csv(output_file, index=False)
+        print(f"Saved: {output_file}")
+
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()
